@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -23,15 +22,11 @@ import (
 
 var (
 	executablePath string
+	targetOp       fsnotify.Op
 
 	initOnce sync.Once
 	Log      func(string, ...interface{})
 )
-
-type dir struct {
-	path string
-	cb   func()
-}
 
 func initialize() error {
 	if Log == nil {
@@ -51,17 +46,28 @@ func initialize() error {
 			)
 		}
 	}
+
+	switch runtime.GOOS {
+	case "darwin", "freebsd", "openbsd", "netbsd", "dragonfly":
+		targetOp = fsnotify.Create
+	case "linux":
+		targetOp = fsnotify.Write
+	default:
+		targetOp = fsnotify.Create
+		Log("untested OS(GOOS) %q; auto restart may not work", runtime.GOOS)
+	}
+
 	return nil
 }
 
-// Auto reload the current process when its binary changes.
+// Auto restart the current process when its binary changes.
 //
 // The Log function is used to display an informational startup message and
 // errors. It works well with e.g. the standard Log package or Logrus.
 //
 // The error return will only return initialisation errors. Once initialized it
 // will use the Log function to print errors, rather than return.
-func Watch(additional ...dir) (err error) {
+func Watch() (err error) {
 	initOnce.Do(func() {
 		err = initialize()
 	})
@@ -77,31 +83,6 @@ func Watch(additional ...dir) (err error) {
 	}
 	defer func() { _ = fileWatcher.Close() }()
 
-	// Watch the directory, because a recompile renames the existing
-	// file (rather than rewriting it), so we won't get events for that.
-	dirs := make([]string, len(additional)+1)
-	dirs[0] = filepath.Dir(executablePath)
-
-	for i := range additional {
-		path, err := filepath.Abs(additional[i].path)
-		if err != nil {
-			return errors.Wrapf(err, "can't get absolute path to %q: %v",
-				additional[i].path, err)
-		}
-
-		s, err := os.Stat(path)
-		if err != nil {
-			return errors.Wrap(err, "os.Stat")
-		}
-		if !s.IsDir() {
-			return errors.Errorf("not a directory: %q; can only watch directories",
-				additional[i].path)
-		}
-
-		additional[i].path = path
-		dirs[i+1] = path
-	}
-
 	done := make(chan bool)
 	go func() {
 		for {
@@ -113,18 +94,7 @@ func Watch(additional ...dir) (err error) {
 			case event := <-fileWatcher.Events:
 				// Ensure that we use the correct events, as they are not uniform accross
 				// platforms. See https://github.com/fsnotify/fsnotify/issues/74
-				var trigger bool
-				switch runtime.GOOS {
-				case "darwin", "freebsd", "openbsd", "netbsd", "dragonfly":
-					trigger = event.Op&fsnotify.Create == fsnotify.Create
-				case "linux":
-					trigger = event.Op&fsnotify.Write == fsnotify.Write
-				default:
-					trigger = event.Op&fsnotify.Create == fsnotify.Create
-					Log("reload: untested OS(GOOS) %q; this package may not work correctly", runtime.GOOS)
-				}
-
-				if !trigger {
+				if targetOp != event.Op&targetOp {
 					continue
 				}
 
@@ -134,32 +104,22 @@ func Watch(additional ...dir) (err error) {
 					time.Sleep(150 * time.Millisecond)
 					Exec()
 				}
-
-				for _, a := range additional {
-					if strings.HasPrefix(event.Name, a.path) {
-						time.Sleep(100 * time.Millisecond)
-						a.cb()
-					}
-				}
 			}
 		}
 	}()
 
-	for _, d := range dirs {
-		if err := fileWatcher.Add(d); err != nil {
-			return errors.Wrapf(err, "can't add %q to watcher", d)
-		}
+	// Watch the directory, because a recompile renames the existing
+	// file (rather than rewriting it), so we won't get events for that.
+	if err := fileWatcher.Add(filepath.Dir(executablePath)); err != nil {
+		return errors.Wrapf(err, "can't watch folder %q", filepath.Dir(executablePath))
 	}
 
-	add := ""
-	if len(additional) > 0 {
-		reldirs := make([]string, len(dirs)-1)
-		for i := range dirs[1:] {
-			reldirs[i] = calcRelativePath(dirs[i+1])
-		}
-		add = fmt.Sprintf(" (additional dirs: %s)", strings.Join(reldirs, ", "))
-	}
-	Log("watching %q %s,restart when it changes", calcRelativePath(executablePath), add)
+	cwd, _ := os.Getwd()
+	relPath, _ := filepath.Rel(cwd, executablePath)
+	Log(
+		`watching "./%s", restart when it changes`,
+		relPath,
+	)
 	<-done
 	return nil
 }
@@ -169,17 +129,4 @@ func Exec() {
 	if err := syscall.Exec(executablePath, append([]string{executablePath}, os.Args[1:]...), os.Environ()); err != nil {
 		panic(fmt.Sprintf("cannot restart: %v", err))
 	}
-}
-
-//  calculate relative path
-func calcRelativePath(p string) string {
-	if cwd, err := os.Getwd(); err != nil {
-		return p
-	} else {
-		if strings.HasPrefix(p, cwd) {
-			return "./" + strings.TrimLeft(p[len(cwd):], "/")
-		}
-	}
-
-	return p
 }

@@ -8,6 +8,7 @@ import (
 )
 
 func main() {
+	// auto restart
 	go func() {
 		err := autoRestart.Watch()
 		if err != nil {

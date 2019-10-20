@@ -1,8 +1,8 @@
-[![GoDoc](https://godoc.org/github.com/teamwork/reload?status.svg)](https://godoc.org/github.com/heawercher/autoRestart)
+[![GoDoc](https://godoc.org/github.com/HaoweiCh/autoRestart?status.svg)](https://godoc.org/github.com/heawercher/autoRestart)
 
 Lightweight automatic reloading of Go processes.
 
-After initialization with `reload.Do()` any changes to the binary (and *only*
+After initialization with `autoRestart.Watch()` any changes to the binary (and *only*
 the binary) will restart the process.
 
 This is an alternative to the "restart binary after any `*.go` file
